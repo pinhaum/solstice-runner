@@ -1,0 +1,555 @@
+<style>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+  body {
+    background: transparent;
+    font-family: var(--font-sans);
+  }
+  #game-root {
+    width: 100%;
+    user-select: none;
+  }
+  #sky-canvas {
+    width: 100%;
+    display: block;
+  }
+  #ui-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: var(--color-background-secondary);
+    border-bottom: 0.5px solid var(--color-border-tertiary);
+    font-size: 13px;
+    color: var(--color-text-secondary);
+  }
+  #ui-bar span {
+    font-weight: 500;
+    color: var(--color-text-primary);
+  }
+  #msg-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    text-align: center;
+    gap: 12px;
+    border-radius: var(--border-radius-lg);
+  }
+  #msg-overlay h2 {
+    font-size: 22px;
+    font-weight: 500;
+  }
+  #msg-overlay p {
+    font-size: 14px;
+    opacity: 0.8;
+    max-width: 280px;
+    line-height: 1.5;
+  }
+  #msg-overlay button {
+    margin-top: 8px;
+    padding: 10px 28px;
+    border-radius: var(--border-radius-md);
+    border: 0.5px solid rgba(255, 255, 255, 0.4);
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #msg-overlay button:hover {
+    background: rgba(255, 255, 255, 0.28);
+  }
+  #canvas-wrap {
+    position: relative;
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+    border: 0.5px solid var(--color-border-tertiary);
+  }
+  #controls {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    padding: 10px 0 4px;
+  }
+  #controls button {
+    padding: 8px 20px;
+    border-radius: var(--border-radius-md);
+    border: 0.5px solid var(--color-border-secondary);
+    background: var(--color-background-primary);
+    color: var(--color-text-primary);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #controls button:hover {
+    background: var(--color-background-secondary);
+  }
+  #hint {
+    text-align: center;
+    font-size: 12px;
+    color: var(--color-text-tertiary);
+    padding-bottom: 4px;
+  }
+</style>
+
+<div id="game-root">
+  <div id="ui-bar">
+    <div>☀️ luz: <span id="ui-light">100%</span></div>
+    <div>pontos: <span id="ui-score">0</span></div>
+    <div>dia: <span id="ui-day">1</span></div>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="sky-canvas"></canvas>
+    <div id="msg-overlay">
+      <h2>Solstice Runner</h2>
+      <p>
+        O dia mais longo do ano. Corra enquanto há luz — cada obstáculo que você
+        pula consome o sol. Chegue ao pôr do sol antes que a escuridão te
+        alcance.
+      </p>
+      <button id="start-btn">Começar →</button>
+    </div>
+  </div>
+  <div id="controls">
+    <button id="jump-btn">⬆ Pular (Espaço / ↑)</button>
+    <button id="slide-btn">⬇ Deslizar (↓)</button>
+  </div>
+  <div id="hint">
+    Quanto mais obstáculos você pula, mais luz consome. Deslize por baixo de
+    alguns para poupar energia solar.
+  </div>
+</div>
+
+<script>
+  const canvas = document.getElementById("sky-canvas");
+  const ctx = canvas.getContext("2d");
+  const W = 680,
+    H = 220;
+  canvas.width = W;
+  canvas.height = H;
+
+  const uiLight = document.getElementById("ui-light");
+  const uiScore = document.getElementById("ui-score");
+  const uiDay = document.getElementById("ui-day");
+  const overlay = document.getElementById("msg-overlay");
+
+  let state = "idle";
+  let raf;
+
+  const GROUND = H - 36;
+  const PLAYER_X = 80;
+
+  let player,
+    obstacles,
+    particles,
+    gameTime,
+    score,
+    light,
+    day,
+    speed,
+    nextSpawn,
+    spawnInterval;
+
+  function skyColor(t) {
+    const stops = [
+      [0, "#0a1628", "#1a2d5a"],
+      [0.18, "#e8603c", "#f5a55a"],
+      [0.28, "#f9d97a", "#ffe4a0"],
+      [0.45, "#87ceeb", "#b8e4f9"],
+      [0.72, "#5ba3d0", "#8ecde8"],
+      [0.82, "#f47b3c", "#f9c96e"],
+      [0.92, "#c0392b", "#e8603c"],
+      [1.0, "#0a1628", "#1a2d5a"],
+    ];
+    let a = stops[0],
+      b = stops[1];
+    for (let i = 0; i < stops.length - 1; i++) {
+      if (t >= stops[i][0] && t <= stops[i + 1][0]) {
+        a = stops[i];
+        b = stops[i + 1];
+        break;
+      }
+    }
+    const p = (t - a[0]) / (b[0] - a[0]);
+    return [lerpColor(a[1], b[1], p), lerpColor(a[2], b[2], p)];
+  }
+
+  function lerpColor(c1, c2, t) {
+    const p1 = parseInt(c1.slice(1), 16),
+      p2 = parseInt(c2.slice(1), 16);
+    const r = Math.round(((p1 >> 16) & 255) * (1 - t) + ((p2 >> 16) & 255) * t);
+    const g = Math.round(((p1 >> 8) & 255) * (1 - t) + ((p2 >> 8) & 255) * t);
+    const b = Math.round((p1 & 255) * (1 - t) + (p2 & 255) * t);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function groundColor(t) {
+    if (t < 0.2 || t > 0.85) return "#1c3a1c";
+    if (t < 0.3 || t > 0.75) return "#2d5a2d";
+    return "#3a7a3a";
+  }
+
+  function sunPos(t) {
+    const angle = Math.PI * t;
+    return { x: W * t, y: GROUND - 30 - Math.sin(angle) * (H - 80) };
+  }
+
+  function initGame() {
+    player = { y: GROUND, vy: 0, sliding: false, slideTimer: 0, h: 32, w: 22 };
+    obstacles = [];
+    particles = [];
+    gameTime = 0.22;
+    score = 0;
+    light = 100;
+    day = 1;
+    speed = 3.2;
+    nextSpawn = 90;
+    spawnInterval = 90;
+  }
+
+  function spawnObstacle() {
+    const types = ["cactus", "bird", "stone"];
+    const weights = [0.45, 0.35, 0.2];
+    const r = Math.random();
+    let type = types[0];
+    let acc = 0;
+    for (let i = 0; i < types.length; i++) {
+      acc += weights[i];
+      if (r < acc) {
+        type = types[i];
+        break;
+      }
+    }
+
+    let ob = { type, x: W + 20, cleared: false };
+    if (type === "cactus") {
+      ob.w = 18;
+      ob.h = 42;
+      ob.y = GROUND - ob.h;
+      ob.needsJump = true;
+    } else if (type === "bird") {
+      ob.w = 28;
+      ob.h = 16;
+      ob.y = GROUND - 60 - Math.random() * 24;
+      ob.needsSlide = false;
+    } else if (type === "stone") {
+      ob.w = 26;
+      ob.h = 18;
+      ob.y = GROUND - ob.h;
+      ob.needsJump = true;
+    }
+    obstacles.push(ob);
+  }
+
+  function addParticle(x, y, color) {
+    for (let i = 0; i < 6; i++) {
+      particles.push({
+        x,
+        y,
+        vx: (Math.random() - 0.5) * 4,
+        vy: -Math.random() * 4 - 1,
+        life: 1,
+        color,
+        size: Math.random() * 5 + 2,
+      });
+    }
+  }
+
+  function jump() {
+    if (state !== "running") return;
+    if (player.y >= GROUND - 1) {
+      player.vy = -11;
+      light = Math.max(0, light - 2.5);
+      addParticle(PLAYER_X + 11, player.y, "#f9d97a");
+    }
+  }
+
+  function slide() {
+    if (state !== "running") return;
+    if (player.y >= GROUND - 1 && !player.sliding) {
+      player.sliding = true;
+      player.slideTimer = 28;
+      light = Math.max(0, light - 0.5);
+    }
+  }
+
+  function showOverlay(title, desc, btn) {
+    overlay.innerHTML = `<h2>${title}</h2><p>${desc}</p><button id="start-btn">${btn}</button>`;
+    overlay.style.display = "flex";
+    document.getElementById("start-btn").onclick = startGame;
+  }
+
+  function startGame() {
+    overlay.style.display = "none";
+    initGame();
+    state = "running";
+    if (raf) cancelAnimationFrame(raf);
+    loop();
+  }
+
+  function loop() {
+    update();
+    draw();
+    if (state === "running" || state === "dead")
+      raf = requestAnimationFrame(loop);
+  }
+
+  function update() {
+    if (state !== "running") return;
+
+    gameTime += 0.0004 * (light / 100);
+    if (gameTime >= 1.0) {
+      gameTime = 0.22;
+      day++;
+      speed = Math.min(speed + 0.5, 8);
+      spawnInterval = Math.max(50, spawnInterval - 6);
+      light = Math.min(100, light + 30);
+    }
+
+    score += Math.round(speed * 0.1);
+
+    player.vy += 0.55;
+    player.y += player.vy;
+    if (player.y > GROUND) {
+      player.y = GROUND;
+      player.vy = 0;
+    }
+
+    if (player.sliding) {
+      player.slideTimer--;
+      if (player.slideTimer <= 0) player.sliding = false;
+    }
+
+    nextSpawn--;
+    if (nextSpawn <= 0) {
+      spawnObstacle();
+      nextSpawn = spawnInterval + Math.floor(Math.random() * 40);
+    }
+
+    const ph = player.sliding ? 14 : player.h;
+    const py = player.sliding ? player.y - 14 : player.y - player.h;
+
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      o.x -= speed;
+
+      if (!o.cleared && o.x + o.w < PLAYER_X) {
+        o.cleared = true;
+        score += 10;
+        addParticle(PLAYER_X, player.y - 20, "#ffe4a0");
+      }
+
+      const px = PLAYER_X + 2;
+      const ox = o.x + 3;
+      const hitX = px < ox + o.w - 3 && px + player.w - 4 > ox;
+      const hitY = py < o.y + o.h && py + ph > o.y;
+
+      if (hitX && hitY) {
+        state = "dead";
+        addParticle(PLAYER_X + 11, player.y - 16, "#e24b4a");
+        setTimeout(() => {
+          showOverlay(
+            "☀️ A luz acabou",
+            `Você correu por ${day} dia${day > 1 ? "s" : ""} e marcou ${score} pontos. O solstício foi longo, mas a escuridão sempre chega.`,
+            "Tentar de novo →",
+          );
+        }, 800);
+        return;
+      }
+
+      if (o.x + o.w < -10) obstacles.splice(i, 1);
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.2;
+      p.life -= 0.06;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+
+    light -= 0.018 * (speed / 3.2);
+    if (light <= 0) {
+      light = 0;
+      state = "dead";
+      setTimeout(() => {
+        showOverlay(
+          "🌑 Noite total",
+          `A luz do solstício se apagou. Você correu por ${day} dia${day > 1 ? "s" : ""} e marcou ${score} pontos.`,
+          "Tentar de novo →",
+        );
+      }, 600);
+    }
+
+    uiLight.textContent = Math.round(light) + "%";
+    uiScore.textContent = score;
+    uiDay.textContent = day;
+  }
+
+  function draw() {
+    const t = Math.max(0, Math.min(1, gameTime));
+    const [sky1, sky2] = skyColor(t);
+    const grd = ctx.createLinearGradient(0, 0, 0, H);
+    grd.addColorStop(0, sky1);
+    grd.addColorStop(1, sky2);
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+
+    const sun = sunPos(t);
+    const isDark = t < 0.22 || t > 0.88;
+    if (!isDark) {
+      const glow = ctx.createRadialGradient(sun.x, sun.y, 0, sun.x, sun.y, 40);
+      glow.addColorStop(0, "rgba(255,240,150,0.35)");
+      glow.addColorStop(1, "rgba(255,200,60,0)");
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(sun.x, sun.y, 40, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = t > 0.75 ? "#f47b3c" : "#ffe566";
+      ctx.beginPath();
+      ctx.arc(sun.x, sun.y, 14, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = "rgba(200,220,255,0.9)";
+      ctx.beginPath();
+      ctx.arc(sun.x, sun.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = groundColor(t);
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fillRect(0, GROUND, W, 2);
+
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      ctx.fillRect(40 + i * 130, GROUND + 4, 60, 6);
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      ctx.fillRect(40 + i * 130, GROUND + 4, 60, 2);
+    }
+
+    for (const o of obstacles) {
+      if (o.type === "cactus") {
+        ctx.fillStyle = "#2d7a2d";
+        ctx.fillRect(o.x + 6, o.y, 6, o.h);
+        ctx.fillRect(o.x, o.y + 12, 18, 6);
+        ctx.fillRect(o.x, o.y + 8, 6, 10);
+        ctx.fillRect(o.x + 12, o.y + 16, 6, 6);
+      } else if (o.type === "bird") {
+        ctx.strokeStyle = "#555";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(o.x, o.y + 8);
+        ctx.quadraticCurveTo(o.x + 14, o.y, o.x + 28, o.y + 8);
+        ctx.stroke();
+      } else if (o.type === "stone") {
+        ctx.fillStyle = "#888";
+        ctx.beginPath();
+        ctx.ellipse(
+          o.x + o.w / 2,
+          o.y + o.h / 2,
+          o.w / 2,
+          o.h / 2,
+          0,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.2)";
+        ctx.beginPath();
+        ctx.ellipse(
+          o.x + o.w / 2 - 3,
+          o.y + o.h / 2 - 3,
+          o.w / 3,
+          o.h / 3.5,
+          -0.4,
+          0,
+          Math.PI,
+        );
+        ctx.fill();
+      }
+    }
+
+    const py = player.sliding ? player.y - 14 : player.y - player.h;
+    const ph = player.sliding ? 14 : player.h;
+    ctx.fillStyle = "#f5c842";
+    ctx.fillRect(PLAYER_X, py, player.w, ph);
+
+    ctx.fillStyle = "#e8a010";
+    ctx.fillRect(PLAYER_X, py, player.w, 5);
+
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(PLAYER_X + 15, py + 8, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.beginPath();
+    ctx.arc(PLAYER_X + 16, py + 8, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (player.y < GROUND) {
+      ctx.strokeStyle = "rgba(249,217,122,0.4)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(PLAYER_X + 11, player.y);
+      ctx.lineTo(PLAYER_X + 11, GROUND);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    for (const p of particles) {
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x, p.y, p.size, p.size);
+      ctx.globalAlpha = 1;
+    }
+
+    if (light < 30) {
+      const darkness = ((30 - light) / 30) * 0.55;
+      ctx.fillStyle = `rgba(0,0,10,${darkness})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  draw();
+
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space" || e.code === "ArrowUp") {
+      e.preventDefault();
+      jump();
+    }
+    if (e.code === "ArrowDown") {
+      e.preventDefault();
+      slide();
+    }
+  });
+
+  document.getElementById("jump-btn").addEventListener("click", jump);
+  document.getElementById("slide-btn").addEventListener("click", slide);
+  document.getElementById("start-btn").addEventListener("click", startGame);
+
+  canvas.addEventListener(
+    "touchstart",
+    (e) => {
+      const touchY = e.touches[0].clientY;
+      const rect = canvas.getBoundingClientRect();
+      const relY = touchY - rect.top;
+      if (relY < rect.height / 2) jump();
+      else slide();
+      e.preventDefault();
+    },
+    { passive: false },
+  );
+</script>
